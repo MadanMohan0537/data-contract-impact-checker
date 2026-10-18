@@ -1,0 +1,17 @@
+dataset = "orders"
+version = "1.0.0"
+producer = "data-platform"
+freshness_hours = 24
+
+[[fields]]
+name = "order_id"
+type = "string"
+required = true
+critical = true
+
+[[fields]]
+name = "amount"
+type = "number"
+required = true
+critical = true
+minimum = 0
