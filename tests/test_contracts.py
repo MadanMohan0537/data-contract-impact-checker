@@ -47,4 +47,33 @@ class ContractTests(unittest.TestCase):
     def test_undeclared_count(self): self.assertEqual(preview_migration(self.c,self.c,known_consumer_count=5).undeclared_consumers,2)
     def test_rows_recorded(self):
         rows=good_rows(); rows[1]["amount"]=-1; b=next(b for b in check_batch(self.c,rows,1).breaches if b.code=="MIN"); self.assertEqual(b.rows,(1,))
+    def test_sql_lineage_detects_undeclared_field_use(self):
+        report=corroborate_sql_lineage(self.c,[QueryUsage("risk-model","SELECT customer_id, amount, status FROM orders")])
+        self.assertEqual(("status",),report.findings[0].undeclared_fields)
+        self.assertFalse(report.complete)
+    def test_sql_lineage_reports_exact_coverage(self):
+        report=corroborate_sql_lineage(self.c,[
+          QueryUsage("revenue-dashboard","SELECT order_id, amount, status FROM orders"),
+          QueryUsage("fulfillment","SELECT order_id, customer_id, status FROM orders"),
+          QueryUsage("risk-model","SELECT customer_id, amount, status FROM orders")])
+        self.assertEqual(8,report.declared_matches); self.assertEqual(9,report.field_references)
+        self.assertAlmostEqual(8/9,report.coverage)
+    def test_sql_comments_and_literals_do_not_create_lineage(self):
+        report=corroborate_sql_lineage(self.c,[QueryUsage("risk-model","SELECT amount FROM orders WHERE note='status' -- customer_id")])
+        self.assertEqual(("amount",),report.findings[0].observed_fields)
+    def test_select_star_expands_contract_fields(self):
+        report=corroborate_sql_lineage(self.c,[QueryUsage("revenue-dashboard","SELECT o.* FROM orders o")])
+        self.assertEqual(set(self.c.field_map),set(report.findings[0].observed_fields))
+    def test_unknown_consumer_is_reported(self):
+        report=corroborate_sql_lineage(self.c,[QueryUsage("shadow-job","SELECT amount FROM orders")])
+        self.assertEqual(1,report.unknown_consumers); self.assertEqual(1,report.undeclared_references)
+    def test_sql_lineage_requires_queries_and_sql(self):
+        with self.assertRaises(ValueError): corroborate_sql_lineage(self.c,[])
+        with self.assertRaises(ValueError): corroborate_sql_lineage(self.c,[QueryUsage("risk-model"," ")])
+    def test_declared_usage_is_complete(self):
+        report=corroborate_sql_lineage(self.c,[QueryUsage("risk-model","SELECT customer_id, amount FROM orders")])
+        self.assertTrue(report.complete); self.assertEqual(1,report.coverage)
+    def test_duplicate_consumers_rejected(self):
+        with self.assertRaises(ValueError): replace(self.c,consumers=(self.c.consumers[0],self.c.consumers[0]))
 if __name__=="__main__": unittest.main()
+

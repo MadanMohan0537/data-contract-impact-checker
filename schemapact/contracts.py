@@ -2,6 +2,7 @@
 from __future__ import annotations
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
+import re
 from typing import Any
 
 TYPES={"string":str,"integer":int,"number":(int,float),"boolean":bool}
@@ -37,6 +38,7 @@ class Contract:
     consumers:tuple[Consumer,...]=()
     def __post_init__(self):
         if len({f.name for f in self.fields})!=len(self.fields): raise ValueError("duplicate field")
+        if len({c.name for c in self.consumers})!=len(self.consumers): raise ValueError("duplicate consumer")
         if self.freshness_hours<1: raise ValueError("freshness must be positive")
     @property
     def field_map(self): return {f.name:f for f in self.fields}
@@ -119,3 +121,61 @@ def preview_migration(old:Contract,new:Contract,renames:dict[str,str]|None=None,
     declared=len(old.consumers); known=known_consumer_count if known_consumer_count is not None else declared
     coverage=1.0 if known==0 else min(1.0,declared/known)
     return MigrationPreview(tuple(impacts),coverage,max(0,known-declared))
+
+@dataclass(frozen=True)
+class QueryUsage:
+    consumer:str
+    sql:str
+
+@dataclass(frozen=True)
+class LineageFinding:
+    consumer:str
+    observed_fields:tuple[str,...]
+    declared_fields:tuple[str,...]
+    undeclared_fields:tuple[str,...]
+    consumer_declared:bool
+
+@dataclass(frozen=True)
+class LineageReport:
+    findings:tuple[LineageFinding,...]
+    consumers_scanned:int
+    field_references:int
+    declared_matches:int
+    undeclared_references:int
+    unknown_consumers:int
+    coverage:float
+    @property
+    def complete(self)->bool:
+        return self.undeclared_references==0 and self.unknown_consumers==0
+
+def _contract_fields_in_sql(sql:str,field_names:set[str])->set[str]:
+    if not sql.strip(): raise ValueError("query SQL cannot be empty")
+    cleaned=re.sub(r"/\*.*?\*/"," ",sql,flags=re.S)
+    cleaned=re.sub(r"--[^\n]*"," ",cleaned)
+    cleaned=re.sub(r"'(?:''|[^'])*'"," ",cleaned)
+    tokens={token.lower() for token in re.findall(r"[A-Za-z_][A-Za-z0-9_]*",cleaned)}
+    observed={field for field in field_names if field.lower() in tokens}
+    if re.search(r"\bselect\s+(?:\w+\.)?\*",cleaned,flags=re.I):
+        observed=set(field_names)
+    return observed
+
+def corroborate_sql_lineage(contract:Contract,queries:list[QueryUsage])->LineageReport:
+    if not queries: raise ValueError("at least one query is required")
+    declared={c.name:c for c in contract.consumers}
+    grouped:dict[str,set[str]]={}
+    for query in queries:
+        if not query.consumer.strip(): raise ValueError("query consumer cannot be empty")
+        grouped.setdefault(query.consumer,set()).update(_contract_fields_in_sql(query.sql,set(contract.field_map)))
+    findings=[]
+    for consumer,observed in sorted(grouped.items()):
+        item=declared.get(consumer)
+        declared_fields=set(item.fields) if item else set()
+        findings.append(LineageFinding(consumer,tuple(sorted(observed)),tuple(sorted(declared_fields)),
+          tuple(sorted(observed-declared_fields)),item is not None))
+    references=sum(len(f.observed_fields) for f in findings)
+    matches=sum(len(set(f.observed_fields)&set(f.declared_fields)) for f in findings)
+    undeclared=sum(len(f.undeclared_fields) for f in findings)
+    unknown=sum(not f.consumer_declared for f in findings)
+    coverage=1.0 if references==0 else matches/references
+    return LineageReport(tuple(findings),len(findings),references,matches,undeclared,unknown,coverage)
+
